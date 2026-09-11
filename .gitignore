@@ -1,0 +1,10 @@
+hardware-configuration.nix
+result
+result-*
+.direnv/
+.env
+.env.*
+*.swp
+*.swo
+*~
+.DS_Store
