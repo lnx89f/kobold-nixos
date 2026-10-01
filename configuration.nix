@@ -320,10 +320,6 @@ in
 
   # One lightweight graphical Polkit agent. XDG autostart from the WM modules
   # starts it in Sway/Niri/Hyprland sessions.
-  environment.systemPackages = with pkgs; [
-    mate-polkit
-  ];
-
   environment.etc."xdg/autostart/kobold-polkit.desktop".text = ''
     [Desktop Entry]
     Type=Application
@@ -563,6 +559,7 @@ in
 
   environment.systemPackages = with pkgs; [
     # Wayland UX
+    mate-polkit
     koboldLock
     koboldIdle
     foot
