@@ -1,47 +1,33 @@
 { config, pkgs, lib, ... }:
 
 let
-  # One lock command works across all three compositors.
-  # Hyprland uses its native locker; Sway and Niri use swaylock.
+  # Native Noctalia v5 from the stable channel, with its built-in Polkit agent.
+  koboldNoctalia = pkgs.writeShellApplication {
+    name = "kobold-noctalia";
+    runtimeInputs = [ pkgs.coreutils ];
+    text = ''
+      export NOCTALIA_CONFIG_HOME="''${XDG_CONFIG_HOME:-$HOME/.config}/noctalia-nixos"
+      mkdir -p "$NOCTALIA_CONFIG_HOME/noctalia"
+      ln -sfnT /etc/xdg/noctalia/nixos.toml "$NOCTALIA_CONFIG_HOME/noctalia/00-nixos.toml"
+      exec ${pkgs.noctalia}/bin/noctalia "$@"
+    '';
+  };
+  # Niri's idle policy; gtklock is independent of any compositor shell.
   koboldLock = pkgs.writeShellApplication {
     name = "kobold-lock";
     text = ''
-      desktop="''${XDG_CURRENT_DESKTOP:-}"
-      case "$desktop" in
-        *Hyprland*|*hyprland*)
-          exec ${pkgs.hyprlock}/bin/hyprlock
-          ;;
-        *)
-          exec ${pkgs.swaylock}/bin/swaylock -f
-          ;;
-      esac
+      exec ${pkgs.gtklock}/bin/gtklock -d
     '';
   };
-
-  # Session-aware idle/lock policy. This is system policy, while visual
-  # compositor configuration remains mutable in ~/.config.
   koboldIdle = pkgs.writeShellApplication {
     name = "kobold-idle";
     text = ''
-      desktop="''${XDG_CURRENT_DESKTOP:-}"
-      case "$desktop" in
-        *Hyprland*|*hyprland*)
-          exec ${pkgs.hypridle}/bin/hypridle --config /etc/xdg/hypr/hypridle.conf
-          ;;
-        *niri*|*Niri*)
-          exec ${pkgs.swayidle}/bin/swayidle -w \
-            timeout 600 '${koboldLock}/bin/kobold-lock' \
-            timeout 660 '${pkgs.niri}/bin/niri msg action power-off-monitors' \
-            before-sleep '${koboldLock}/bin/kobold-lock'
-          ;;
-        *)
-          exec ${pkgs.swayidle}/bin/swayidle -w \
-            timeout 600 '${koboldLock}/bin/kobold-lock' \
-            timeout 660 '${pkgs.sway}/bin/swaymsg "output * power off"' \
-            resume '${pkgs.sway}/bin/swaymsg "output * power on"' \
-            before-sleep '${koboldLock}/bin/kobold-lock'
-          ;;
-      esac
+      exec ${pkgs.swayidle}/bin/swayidle -w \
+        timeout 600 '${koboldLock}/bin/kobold-lock' \
+        timeout 660 '${config.programs.niri.package}/bin/niri msg action power-off-monitors' \
+        resume '${config.programs.niri.package}/bin/niri msg action power-on-monitors' \
+        lock '${koboldLock}/bin/kobold-lock' \
+        before-sleep '${koboldLock}/bin/kobold-lock'
     '';
   };
 in
@@ -254,88 +240,102 @@ in
 
   environment.sessionVariables = {
     XKB_DEFAULT_LAYOUT = "br";
-    TERMINAL = "foot";
+    TERMINAL = "alacritty";
+    CONTAINER_MANAGER = "podman";
     EDITOR = "hx";
     VISUAL = "hx";
     LIBVIRT_DEFAULT_URI = "qemu:///system";
   };
 
   # ------------------------------------------------------------
-  # WAYLAND DESKTOPS — Sway + Niri + Hyprland
+  # WAYLAND DESKTOP — Niri
   # ------------------------------------------------------------
-  programs.sway = {
-    enable = true;
-    xwayland.enable = true;
-  };
-
   programs.niri = {
     enable = true;
-    # GTK portal handles file choosing; do not pull Nautilus just for this.
     useNautilus = false;
   };
 
-  programs.hyprland = {
-    enable = true;
-    xwayland.enable = true;
-    # Hyprland is launched through start-hyprland and uses its native systemd
-    # session integration. Avoid an extra UWSM layer on this single-user host.
-    withUWSM = false;
-  };
-
-  # Autologin once into Hyprland. After logout, greetd stays at the TUI greeter and
-  # lets you choose Hyprland, Sway or Niri from the registered Wayland sessions.
-  services.greetd = {
-    enable = true;
-    useTextGreeter = true;
-
-    settings = {
-      initial_session = {
-        # Use Hyprland's supported launcher rather than invoking the compositor
-        # binary directly; it prepares the session environment correctly.
-        command = "${config.programs.hyprland.package}/bin/start-hyprland";
-        user = "kobold";
-      };
-
-      default_session = {
-        command = lib.concatStringsSep " " [
-          "${pkgs.tuigreet}/bin/tuigreet"
-          "--time"
-          "--remember"
-          "--remember-user-session"
-          "--asterisks"
-          "--greeting Kobold"
-          "--sessions /run/current-system/sw/share/wayland-sessions"
-        ];
-        user = "greeter";
-      };
+  services.displayManager = {
+    defaultSession = "niri";
+    ly = {
+      enable = true;
+      x11Support = false;
     };
   };
 
-  # Wayland session modules already enable the necessary portal infrastructure.
-  # Keep only the extra GTK portal explicitly available for generic applications.
-  xdg.portal.enable = true;
-
-  # Polkit is required by libvirt, fwupd and normal privileged desktop actions.
-  security.polkit.enable = true;
-
-  # One lightweight graphical Polkit agent. XDG autostart from the WM modules
-  # starts it in Sway/Niri/Hyprland sessions.
-  environment.etc."xdg/autostart/kobold-polkit.desktop".text = ''
-    [Desktop Entry]
-    Type=Application
-    Name=Kobold Polkit Agent
-    Exec=${pkgs.mate-polkit}/libexec/polkit-mate-authentication-agent-1
-    NoDisplay=true
-    X-GNOME-Autostart-enabled=true
+  # Keep GNOME's screencast backend for Niri, with GTK file dialogs.
+  xdg.portal = {
+    enable = true;
+    config.niri."org.freedesktop.impl.portal.FileChooser" = "gtk";
+    config.niri."org.freedesktop.impl.portal.Secret" = lib.mkForce "none";
+  };
+  # System fallback; ~/.config/niri/config.kdl takes precedence.
+  environment.etc."niri/config.kdl".text = ''
+    input {
+      keyboard { xkb { layout "br"; }; }
+      touchpad { tap; natural-scroll; }
+    }
+    layout {
+      gaps 8
+      default-column-width { proportion 0.5; }
+    }
+    prefer-no-csd
+    binds {
+      Mod+Return { spawn "alacritty"; }
+      Mod+T { spawn "alacritty"; }
+      Mod+E { spawn "thunar"; }
+      Mod+D { spawn "fuzzel"; }
+      Mod+L { spawn "kobold-lock"; }
+      Mod+Q { close-window; }
+      Mod+Left { focus-column-left; }
+      Mod+Right { focus-column-right; }
+      Mod+Up { focus-window-up; }
+      Mod+Down { focus-window-down; }
+      Mod+Shift+Left { move-column-left; }
+      Mod+Shift+Right { move-column-right; }
+      Mod+Shift+Up { move-window-up; }
+      Mod+Shift+Down { move-window-down; }
+      Mod+Page_Up { focus-workspace-up; }
+      Mod+Page_Down { focus-workspace-down; }
+      Mod+Shift+Page_Up { move-column-to-workspace-up; }
+      Mod+Shift+Page_Down { move-column-to-workspace-down; }
+      Mod+F { maximize-column; }
+      Mod+Shift+F { fullscreen-window; }
+      Mod+O { toggle-overview; }
+      Mod+Shift+E { quit; }
+      Print { screenshot; }
+      XF86AudioRaiseVolume allow-when-locked=true { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "0.05+" "-l" "1.0"; }
+      XF86AudioLowerVolume allow-when-locked=true { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "0.05-"; }
+      XF86AudioMute allow-when-locked=true { spawn "wpctl" "set-mute" "@DEFAULT_AUDIO_SINK@" "toggle"; }
+      XF86MonBrightnessUp { spawn "brightnessctl" "set" "+5%"; }
+      XF86MonBrightnessDown { spawn "brightnessctl" "set" "5%-"; }
+    }
   '';
 
-  # Network tray applet starts automatically in graphical sessions.
-  programs.nm-applet = {
-    enable = true;
-    indicator = true;
-  };
+  environment.etc."xdg/noctalia/nixos.toml".text = ''
+    [shell]
+    polkit_agent = true
 
-  services.blueman.enable = true;
+    [idle.behavior.lock]
+    enabled = false
+
+    [idle.behavior.screen-off]
+    enabled = false
+  '';
+
+  environment.etc."xdg/autostart/kobold-noctalia.desktop".text = ''
+    [Desktop Entry]
+    Type=Application
+    Name=Noctalia
+    Exec=${koboldNoctalia}/bin/kobold-noctalia
+    OnlyShowIn=niri;
+    NoDisplay=true
+  '';
+
+  # Niri enables this by default; omit the optional GNOME credential daemon.
+  services.gnome.gnome-keyring.enable = false;
+  security.polkit.enable = true;
+  services.upower.enable = true;
 
   # Lightweight file manager without installing an entire desktop environment.
   programs.thunar = {
@@ -363,69 +363,17 @@ in
   # ------------------------------------------------------------
   # SCREEN LOCKING
   # ------------------------------------------------------------
-  # Both PAM services authenticate against the kobold account password.
-  security.pam.services.swaylock = { };
-  security.pam.services.hyprlock = { };
+  security.pam.services.gtklock = { };
+  security.pam.services.noctalia = { };
 
-  # Start the appropriate idle daemon in every compositor session. NixOS'
-  # Wayland-session modules run XDG autostart entries for bare WMs.
+  # niri-session starts the XDG autostart target with the Wayland environment.
   environment.etc."xdg/autostart/kobold-idle.desktop".text = ''
     [Desktop Entry]
     Type=Application
     Name=Kobold Idle Lock
     Exec=${koboldIdle}/bin/kobold-idle
+    OnlyShowIn=niri;
     NoDisplay=true
-    X-GNOME-Autostart-enabled=true
-  '';
-
-  # Minimal native Hyprland lock screen. A user config in ~/.config/hypr/
-  # overrides this system fallback automatically.
-  environment.etc."xdg/hypr/hyprlock.conf".text = ''
-    general {
-        hide_cursor = true
-        immediate_render = true
-    }
-
-    background {
-        monitor =
-        color = rgba(111111ff)
-        blur_passes = 0
-    }
-
-    input-field {
-        monitor =
-        size = 260, 52
-        outline_thickness = 2
-        outer_color = rgb(555555)
-        inner_color = rgb(111111)
-        font_color = rgb(eeeeee)
-        placeholder_text = Password...
-        fail_text = $FAIL ($ATTEMPTS)
-        position = 0, 0
-        halign = center
-        valign = center
-    }
-  '';
-
-  environment.etc."xdg/hypr/hypridle.conf".text = ''
-    general {
-        lock_cmd = ${koboldLock}/bin/kobold-lock
-        before_sleep_cmd = ${pkgs.systemd}/bin/loginctl lock-session
-        after_sleep_cmd = ${pkgs.hyprland}/bin/hyprctl dispatch dpms on
-        ignore_dbus_inhibit = false
-        ignore_systemd_inhibit = false
-    }
-
-    listener {
-        timeout = 600
-        on-timeout = ${pkgs.systemd}/bin/loginctl lock-session
-    }
-
-    listener {
-        timeout = 660
-        on-timeout = ${pkgs.hyprland}/bin/hyprctl dispatch dpms off
-        on-resume = ${pkgs.hyprland}/bin/hyprctl dispatch dpms on
-    }
   '';
 
   # ------------------------------------------------------------
@@ -489,7 +437,7 @@ in
     # Intentionally no password/hash in this file.
     # Set it locally after nixos-install, before first reboot:
     #   nixos-enter --root /mnt -c 'passwd kobold'
-    # This password is used by sudo, tuigreet after logout and the lock screen.
+    # This password is used by sudo, Ly and the lock screen.
   };
 
   security.sudo = {
@@ -556,21 +504,18 @@ in
   # ------------------------------------------------------------
   programs.fish.enable = true;
   programs.firefox.enable = true;
+  programs.virt-manager.enable = true;
 
   environment.systemPackages = with pkgs; [
     # Wayland UX
-    mate-polkit
+    noctalia
+    koboldNoctalia
     koboldLock
     koboldIdle
-    foot
-    waybar
+    alacritty
     fuzzel
-    mako
-    swaybg
     swayidle
-    swaylock
-    hypridle
-    hyprlock
+    gtklock
     xwayland-satellite
     wl-clipboard
     cliphist
@@ -616,7 +561,6 @@ in
     skopeo
 
     # Virtualization UI
-    virt-manager
     virt-viewer
 
     # Hardware / security / diagnostics
@@ -639,6 +583,13 @@ in
   # Flatpak is available as the isolation layer for GUI apps. Do not declare
   # Flathub as a root-owned remote here; add it per-user after login if desired.
   services.flatpak.enable = true;
+
+  xdg.mime = {
+    enable = true;
+    defaultApplications = {
+      "inode/directory" = [ "thunar.desktop" ];
+    };
+  };
 
   # ------------------------------------------------------------
   # QUALITY-OF-LIFE COMMANDS
